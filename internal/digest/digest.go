@@ -145,10 +145,10 @@ func renderDigestText(snap Snapshot) string {
 	for _, a := range snap.Apps {
 		fmt.Fprintf(&b, "*%s* — %d machine(s)", a.App, a.Total)
 		if a.Total > 0 {
-			fmt.Fprintf(&b, ", states: %s", formatStateCounts(a.StateCounts))
+			fmt.Fprintf(&b, ", states: %s", FormatStateCounts(a.StateCounts))
 		}
 		if len(a.Regions) > 0 {
-			fmt.Fprintf(&b, ", regions: %s", formatStringIntMap(a.Regions))
+			fmt.Fprintf(&b, ", regions: %s", FormatStringIntMap(a.Regions))
 		}
 		if a.FailingChecks > 0 {
 			fmt.Fprintf(&b, ", *%d failing check(s)*", a.FailingChecks)
@@ -161,7 +161,7 @@ func renderDigestText(snap Snapshot) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func formatStateCounts(m map[string]int) string {
+func FormatStateCounts(m map[string]int) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -174,7 +174,7 @@ func formatStateCounts(m map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
-func formatStringIntMap(m map[string]int) string {
+func FormatStringIntMap(m map[string]int) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

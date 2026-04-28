@@ -216,10 +216,10 @@ func renderAppSection(a digest.AppSummary) string {
 	}
 	fmt.Fprintf(&b, "%s *%s* — %d machine(s)", emoji, escapeMarkdown(a.App), a.Total)
 	if a.Total > 0 {
-		fmt.Fprintf(&b, " (%s)", formatStateCounts(a.StateCounts))
+		fmt.Fprintf(&b, " (%s)", digest.FormatStateCounts(a.StateCounts))
 	}
 	if len(a.Regions) > 0 {
-		fmt.Fprintf(&b, "\n• regions: %s", formatStringIntMap(a.Regions))
+		fmt.Fprintf(&b, "\n• regions: %s", digest.FormatStringIntMap(a.Regions))
 	}
 	if a.FailingChecks > 0 {
 		fmt.Fprintf(&b, "\n• :warning: *%d failing check(s)*", a.FailingChecks)
@@ -231,32 +231,6 @@ func renderAppSection(a digest.AppSummary) string {
 		fmt.Fprintf(&b, "\n• last activity: %s", a.LatestDeploy.UTC().Format("2006-01-02 15:04 UTC"))
 	}
 	return b.String()
-}
-
-func formatStateCounts(m map[string]int) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var parts []string
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%d %s", m[k], k))
-	}
-	return strings.Join(parts, ", ")
-}
-
-func formatStringIntMap(m map[string]int) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var parts []string
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s×%d", k, m[k]))
-	}
-	return strings.Join(parts, ", ")
 }
 
 func truncate(s string, n int) string {
