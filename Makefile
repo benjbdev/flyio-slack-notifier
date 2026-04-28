@@ -2,7 +2,7 @@ GO ?= /usr/local/go/bin/go
 BIN := notifier
 CONFIG ?= config.yaml
 
-.PHONY: build dev run test test-integration tidy fmt vet clean
+.PHONY: build dev run test tidy fmt vet clean
 
 build:
 	$(GO) build -o $(BIN) ./cmd/notifier
@@ -15,9 +15,6 @@ dev:
 
 test:
 	$(GO) test ./...
-
-test-integration:
-	$(GO) test -tags integration ./...
 
 tidy:
 	$(GO) mod tidy

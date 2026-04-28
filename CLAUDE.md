@@ -9,11 +9,10 @@ The Makefile pins `GO ?= /usr/local/go/bin/go` (override with `make GO=go ...` i
 - `make dev` — run from source against `config.yaml` (`./cmd/notifier`)
 - `make build` — produce `./notifier`; `make run` builds then runs with `--config $(CONFIG)`
 - `make test` — full unit suite (hermetic; no Fly/Slack network)
-- `make test-integration` — runs tests behind the `integration` build tag
 - `make fmt` / `make vet` / `make tidy` — standard Go hygiene
 - `make clean` — removes the binary **and** `notifier.db`
 
-Single test / package: `go test ./internal/poller -run TestBootstrapSuppresses` (replace package and `-run` regex). Integration-tagged tests need `-tags integration`.
+Single test / package: `go test ./internal/poller -run TestBootstrapSuppresses` (replace package and `-run` regex).
 
 Runtime needs `FLY_API_TOKEN` and `SLACK_WEBHOOK_FLY_NOTIF` in env or `.env`. `notifier.db` (BoltDB) holds the event cursor — delete it to fully reset state and force a fresh bootstrap.
 
@@ -47,4 +46,4 @@ digester ┘
 - Module path: `github.com/benjbdev/flyio-slack-notifier`. Use this prefix for new internal imports.
 - All packages use `slog` with a `component` attribute; new components should follow (`logger.With("component", "foo")`).
 - Cron schedules are **UTC** (set explicitly in `main.go`), not local time.
-- Tests are colocated (`*_test.go`) and hermetic — they fake the Fly API with `httptest` and use temp BoltDB files. Don't introduce real network calls without an `integration` build tag.
+- Tests are colocated (`*_test.go`) and hermetic — they fake the Fly API with `httptest` and use temp BoltDB files. Don't introduce real network calls in unit tests.
