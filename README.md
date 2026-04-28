@@ -1,5 +1,7 @@
 # flyio-slack-notifier
 
+[![CI](https://github.com/benjbdev/flyio-slack-notifier/actions/workflows/ci.yml/badge.svg)](https://github.com/benjbdev/flyio-slack-notifier/actions/workflows/ci.yml)
+
 Self-hosted Slack notifier for Fly.io. Polls the Fly Machines API and
 posts deploy / lifecycle / health-check events plus a recurring status
 digest to a Slack channel via an Incoming Webhook.
