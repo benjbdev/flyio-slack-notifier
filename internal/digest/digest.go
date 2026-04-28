@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/benjbdev/flyio-slack-notifier/internal/event"
@@ -52,18 +53,30 @@ func (d *Digester) Run(ctx context.Context) {
 }
 
 func (d *Digester) snapshot(ctx context.Context) (Snapshot, error) {
-	now := time.Now()
-	snap := Snapshot{GeneratedAt: now, OverallSeverity: event.SeverityInfo}
+	results := make([]*AppSummary, len(d.Apps))
+	var wg sync.WaitGroup
+	for i, app := range d.Apps {
+		wg.Add(1)
+		go func(i int, app string) {
+			defer wg.Done()
+			machines, err := d.Client.ListMachines(ctx, app)
+			if err != nil {
+				d.Logger.Warn("digest list machines", "app", app, "err", err)
+				return
+			}
+			s := summarize(app, machines)
+			results[i] = &s
+		}(i, app)
+	}
+	wg.Wait()
 
-	for _, app := range d.Apps {
-		machines, err := d.Client.ListMachines(ctx, app)
-		if err != nil {
-			d.Logger.Warn("digest list machines", "app", app, "err", err)
+	snap := Snapshot{GeneratedAt: time.Now(), OverallSeverity: event.SeverityInfo}
+	for _, r := range results {
+		if r == nil {
 			continue
 		}
-		summary := summarize(app, machines)
-		snap.Apps = append(snap.Apps, summary)
-		if sev := summary.Severity(); severityRank(sev) > severityRank(snap.OverallSeverity) {
+		snap.Apps = append(snap.Apps, *r)
+		if sev := r.Severity(); severityRank(sev) > severityRank(snap.OverallSeverity) {
 			snap.OverallSeverity = sev
 		}
 	}

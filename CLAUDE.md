@@ -12,7 +12,7 @@ The Makefile pins `GO ?= /usr/local/go/bin/go` (override with `make GO=go ...` i
 - `make fmt` / `make vet` / `make tidy` — standard Go hygiene
 - `make clean` — removes the binary **and** `notifier.db`
 
-Single test / package: `go test ./internal/poller -run TestBootstrapSuppresses` (replace package and `-run` regex).
+Single test / package: `go test ./internal/poller -run TestBootstrapSuppresses` (replace package and `-run` regex). Run `go test -race ./...` after touching `Poller.pollAll` or `Digester.snapshot` — both fan out per-app HTTP calls across goroutines.
 
 Runtime needs `FLY_API_TOKEN` and `SLACK_WEBHOOK_FLY_NOTIF` in env or `.env`. `notifier.db` (BoltDB) holds the event cursor — delete it to fully reset state and force a fresh bootstrap.
 

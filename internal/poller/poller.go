@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/benjbdev/flyio-slack-notifier/internal/event"
@@ -65,11 +66,17 @@ func (p *Poller) Run(ctx context.Context) error {
 }
 
 func (p *Poller) pollAll(ctx context.Context) error {
+	var wg sync.WaitGroup
 	for _, app := range p.Apps {
-		if err := p.pollApp(ctx, app); err != nil {
-			p.Logger.Warn("poll app failed", "app", app, "err", err)
-		}
+		wg.Add(1)
+		go func(app string) {
+			defer wg.Done()
+			if err := p.pollApp(ctx, app); err != nil {
+				p.Logger.Warn("poll app failed", "app", app, "err", err)
+			}
+		}(app)
 	}
+	wg.Wait()
 	return nil
 }
 
