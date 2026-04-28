@@ -175,36 +175,24 @@ every minute regardless of whether anything changed.
 
 ### Optional: create a throwaway app
 
-If you'd rather not poke at a real app, create a disposable one:
-
 ```bash
 mkdir /tmp/notifier-test && cd /tmp/notifier-test
-cat > Dockerfile <<'EOF'
-FROM nginx:alpine
-EOF
+echo 'FROM nginx:alpine' > Dockerfile
 fly launch --name notifier-test --org <your-org> --no-deploy --copy-config=false
 fly deploy
 ```
 
-`fly launch` registers the app (so it shows up in the API) and writes
-a `fly.toml`; without that step `fly deploy` errors with `app not
-found`. After it's deployed, the same `fly machine restart` flow
-above works.
-
-Tear it down with `fly apps destroy notifier-test`.
+`fly launch` registers the app (so the API can see it) before `fly
+deploy`; same `fly machine restart` flow as above. Clean up with
+`fly apps destroy notifier-test`.
 
 ## Tests
-
-Hermetic unit tests (no network, no Fly account, no Slack workspace):
 
 ```bash
 make test
 ```
 
-Covers config parsing + `${VAR}` interpolation, BoltDB roundtrip,
-poller bootstrap suppression / event emission / deploy detection,
-digest summarization, Slack dispatcher formatting / dedup / retry on
-429/5xx.
+Hermetic — no network, no Fly account, no Slack workspace.
 
 ## Configuration reference
 
@@ -232,18 +220,6 @@ digest:
 
 `${VAR}` references in the YAML are expanded from the process
 environment at startup (after `.env` is loaded).
-
-## Project layout
-
-```
-cmd/notifier/main.go        # entrypoint: load config, wire components, signals
-internal/config/            # YAML + ${VAR} loader, .env reader
-internal/event/             # normalized Event type + Kind/Severity enums
-internal/flyapi/            # Machines REST client
-internal/poller/            # 30s poll loop, state diff, deploy detection, BoltDB cursor
-internal/digest/            # cron-driven status summarizer
-internal/slack/             # Block Kit formatter, dedup, POST + retry
-```
 
 ## Troubleshooting
 
