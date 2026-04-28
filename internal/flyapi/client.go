@@ -88,7 +88,6 @@ type CheckStatus struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-// ListMachines returns all machines for an app.
 func (c *Client) ListMachines(ctx context.Context, app string) ([]Machine, error) {
 	url := fmt.Sprintf("%s/v1/apps/%s/machines", c.BaseURL, app)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

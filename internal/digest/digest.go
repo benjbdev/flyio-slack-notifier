@@ -35,8 +35,6 @@ type Snapshot struct {
 	OverallSeverity event.Severity
 }
 
-// Run computes a snapshot of all configured apps and emits a single
-// digest event.
 func (d *Digester) Run(ctx context.Context) {
 	snap, err := d.snapshot(ctx)
 	if err != nil {

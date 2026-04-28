@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/benjbdev/flyio-slack-notifier/internal/event"
 	"github.com/benjbdev/flyio-slack-notifier/internal/flyapi"
 )
+
+const metaImageRef = "image_ref"
 
 type Poller struct {
 	Client   *flyapi.Client
@@ -86,33 +89,19 @@ func (p *Poller) pollApp(ctx context.Context, app string) error {
 	return nil
 }
 
-// detectDeploy emits a single deploy event when the dominant image_ref
-// across an app's machines changes vs. what we recorded last poll.
 func (p *Poller) detectDeploy(app string, machines []flyapi.Machine) {
 	current := dominantImage(machines)
 	if current == "" {
 		return
 	}
 
-	prev, err := p.Store.LastSeen(app, "__image__")
-	if err != nil {
-		p.Logger.Warn("read image cursor", "app", app, "err", err)
-		return
-	}
-	prevImage, _ := p.Store.GetMeta(app, "image_ref")
-
-	if prev == 0 && prevImage == "" {
-		// first time seeing this app — record without emitting.
-		_ = p.Store.SetMeta(app, "image_ref", current)
-		_ = p.Store.SetLastSeen(app, "__image__", time.Now().UnixMilli())
-		return
-	}
-
+	prevImage, _ := p.Store.GetMeta(app, metaImageRef)
 	if prevImage == current {
 		return
 	}
 
-	if !p.bootstrap {
+	firstSight := prevImage == ""
+	if !firstSight && !p.bootstrap {
 		p.emit(event.Event{
 			Kind:      event.KindDeploy,
 			Severity:  event.SeverityInfo,
@@ -121,15 +110,14 @@ func (p *Poller) detectDeploy(app string, machines []flyapi.Machine) {
 			Title:     fmt.Sprintf("%s deployed", app),
 			Detail:    fmt.Sprintf("image: %s", current),
 			Fields: map[string]string{
-				"app":       app,
-				"image":     current,
-				"prev":      prevImage,
-				"machines":  fmt.Sprintf("%d", len(machines)),
+				"app":      app,
+				"image":    current,
+				"prev":     prevImage,
+				"machines": strconv.Itoa(len(machines)),
 			},
 		})
 	}
-	_ = p.Store.SetMeta(app, "image_ref", current)
-	_ = p.Store.SetLastSeen(app, "__image__", time.Now().UnixMilli())
+	_ = p.Store.SetMeta(app, metaImageRef, current)
 }
 
 func dominantImage(machines []flyapi.Machine) string {
