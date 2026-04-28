@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/becreacom/flyio-slack/internal/digest"
-	"github.com/becreacom/flyio-slack/internal/event"
+	"github.com/benjbdev/flyio-slack-notifier/internal/digest"
+	"github.com/benjbdev/flyio-slack-notifier/internal/event"
 )
 
 // Message is the JSON payload posted to a Slack incoming webhook.

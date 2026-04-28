@@ -1,8 +1,8 @@
 package digest
 
 import (
-	"github.com/becreacom/flyio-slack/internal/event"
-	"github.com/becreacom/flyio-slack/internal/flyapi"
+	"github.com/benjbdev/flyio-slack-notifier/internal/event"
+	"github.com/benjbdev/flyio-slack-notifier/internal/flyapi"
 	"testing"
 )
 

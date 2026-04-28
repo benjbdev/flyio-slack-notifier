@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/becreacom/flyio-slack/internal/event"
+	"github.com/benjbdev/flyio-slack-notifier/internal/event"
 )
 
 type Dispatcher struct {

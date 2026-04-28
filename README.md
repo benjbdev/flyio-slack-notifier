@@ -1,4 +1,4 @@
-# flyio-slack
+# flyio-slack-notifier
 
 Self-hosted Slack notifier for Fly.io. Polls the Fly Machines API and
 posts deploy / lifecycle / health-check events plus a recurring status

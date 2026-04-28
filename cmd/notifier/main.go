@@ -11,12 +11,12 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/becreacom/flyio-slack/internal/config"
-	"github.com/becreacom/flyio-slack/internal/digest"
-	"github.com/becreacom/flyio-slack/internal/event"
-	"github.com/becreacom/flyio-slack/internal/flyapi"
-	"github.com/becreacom/flyio-slack/internal/poller"
-	"github.com/becreacom/flyio-slack/internal/slack"
+	"github.com/benjbdev/flyio-slack-notifier/internal/config"
+	"github.com/benjbdev/flyio-slack-notifier/internal/digest"
+	"github.com/benjbdev/flyio-slack-notifier/internal/event"
+	"github.com/benjbdev/flyio-slack-notifier/internal/flyapi"
+	"github.com/benjbdev/flyio-slack-notifier/internal/poller"
+	"github.com/benjbdev/flyio-slack-notifier/internal/slack"
 )
 
 func main() {

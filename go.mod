@@ -1,4 +1,4 @@
-module github.com/becreacom/flyio-slack
+module github.com/benjbdev/flyio-slack-notifier
 
 go 1.26
 
