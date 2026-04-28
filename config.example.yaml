@@ -1,0 +1,19 @@
+fly:
+  api_token: ${FLY_API_TOKEN}
+
+apps:
+  - name: api-prod
+  - name: worker-staging
+
+slack:
+  default_webhook: ${SLACK_WEBHOOK_FLY_NOTIF}
+
+poll_interval: 30s
+dedup_window: 5m
+
+state_file: ./notifier.db
+
+digest:
+  enabled: true
+  # every minute (for testing). Switch to "0 * * * *" for hourly.
+  schedule: "* * * * *"

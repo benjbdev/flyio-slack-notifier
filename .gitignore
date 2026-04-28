@@ -1,0 +1,6 @@
+.env
+*.db
+/notifier
+/bin/
+/dist/
+config.yaml
