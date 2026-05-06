@@ -7,17 +7,21 @@ import (
 type Kind string
 
 const (
-	KindDeploy              Kind = "deploy"
-	KindMachineStarted      Kind = "machine_started"
-	KindMachineStopped      Kind = "machine_stopped"
-	KindMachineExit         Kind = "machine_exit"
-	KindMachineOOM          Kind = "machine_oom"
-	KindMachineCreated      Kind = "machine_created"
-	KindMachineDestroyed    Kind = "machine_destroyed"
-	KindMachineEvent        Kind = "machine_event"
-	KindHealthCheckFailing  Kind = "healthcheck_failing"
-	KindHealthCheckPassing  Kind = "healthcheck_passing"
-	KindDigest              Kind = "digest"
+	KindDeploy             Kind = "deploy"
+	KindMachineStarted     Kind = "machine_started"
+	KindMachineStopped     Kind = "machine_stopped"
+	KindMachineExit        Kind = "machine_exit"
+	KindMachineOOM         Kind = "machine_oom"
+	KindMachineCrashed     Kind = "machine_crashed"
+	KindMachineCreated     Kind = "machine_created"
+	KindMachineDestroyed   Kind = "machine_destroyed"
+	KindMachineEvent       Kind = "machine_event"
+	KindHealthCheckFailing Kind = "healthcheck_failing"
+	KindHealthCheckPassing Kind = "healthcheck_passing"
+	KindCrashLoop          Kind = "crash_loop"
+	KindCapacityDegraded   Kind = "capacity_degraded"
+	KindCapacityRestored   Kind = "capacity_restored"
+	KindDigest             Kind = "digest"
 )
 
 type Severity string

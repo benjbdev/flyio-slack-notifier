@@ -168,6 +168,196 @@ func TestPollerDeployDetection(t *testing.T) {
 	}
 }
 
+func TestPollerEmitsOOMFromExitPayload(t *testing.T) {
+	first := `[{
+		"id":"m1","state":"started","region":"cdg",
+		"image_ref":{"repository":"api-prod","tag":"v1"},
+		"events":[{"id":"e1","type":"start","status":"started","timestamp":1700000000000}]
+	}]`
+	second := `[{
+		"id":"m1","state":"stopped","region":"cdg",
+		"image_ref":{"repository":"api-prod","tag":"v1"},
+		"events":[
+			{"id":"e1","type":"start","status":"started","timestamp":1700000000000},
+			{"id":"e2","type":"exit","status":"stopped","timestamp":1700000050000,
+			 "request":{"exit_event":{"exit_code":137,"guest_signal":-1,"oom_killed":true,"requested_stop":false}}}
+		]
+	}]`
+
+	current := first
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 8)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	current = second
+	_ = p.pollAll(context.Background())
+	got := collect(ch, 100*time.Millisecond)
+
+	var sawOOM bool
+	for _, ev := range got {
+		if ev.Kind == event.KindMachineOOM {
+			sawOOM = true
+			if ev.Severity != event.SeverityCritical {
+				t.Errorf("OOM severity = %s, want critical", ev.Severity)
+			}
+			if ev.Fields["oom_killed"] != "true" || ev.Fields["exit_code"] != "137" {
+				t.Errorf("OOM fields incomplete: %+v", ev.Fields)
+			}
+		}
+	}
+	if !sawOOM {
+		t.Errorf("expected OOM event, got %+v", got)
+	}
+}
+
+func TestPollerEmitsCrashedOnNonZeroExit(t *testing.T) {
+	first := `[{
+		"id":"m1","state":"started","region":"cdg",
+		"image_ref":{"repository":"api-prod","tag":"v1"},
+		"events":[{"id":"e1","type":"start","status":"started","timestamp":1700000000000}]
+	}]`
+	second := `[{
+		"id":"m1","state":"stopped","region":"cdg",
+		"image_ref":{"repository":"api-prod","tag":"v1"},
+		"events":[
+			{"id":"e1","type":"start","status":"started","timestamp":1700000000000},
+			{"id":"e2","type":"exit","status":"stopped","timestamp":1700000050000,
+			 "request":{"exit_event":{"exit_code":139,"guest_signal":11,"oom_killed":false,"requested_stop":false}}}
+		]
+	}]`
+
+	current := first
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 8)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	current = second
+	_ = p.pollAll(context.Background())
+	got := collect(ch, 100*time.Millisecond)
+
+	var sawCrashed bool
+	for _, ev := range got {
+		if ev.Kind == event.KindMachineCrashed {
+			sawCrashed = true
+			if ev.Severity != event.SeverityCritical {
+				t.Errorf("crashed severity = %s", ev.Severity)
+			}
+			if ev.Fields["exit_code"] != "139" {
+				t.Errorf("exit_code = %q", ev.Fields["exit_code"])
+			}
+		}
+	}
+	if !sawCrashed {
+		t.Errorf("expected crashed event, got %+v", got)
+	}
+}
+
+func TestPollerCleanExitWhenRequestedStop(t *testing.T) {
+	first := `[{
+		"id":"m1","state":"started","region":"cdg",
+		"image_ref":{"repository":"api-prod","tag":"v1"},
+		"events":[{"id":"e1","type":"start","status":"started","timestamp":1700000000000}]
+	}]`
+	second := `[{
+		"id":"m1","state":"stopped","region":"cdg",
+		"image_ref":{"repository":"api-prod","tag":"v1"},
+		"events":[
+			{"id":"e1","type":"start","status":"started","timestamp":1700000000000},
+			{"id":"e2","type":"exit","status":"stopped","timestamp":1700000050000,
+			 "request":{"exit_event":{"exit_code":0,"requested_stop":true}}}
+		]
+	}]`
+
+	current := first
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 8)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	current = second
+	_ = p.pollAll(context.Background())
+	got := collect(ch, 100*time.Millisecond)
+
+	for _, ev := range got {
+		if ev.Kind == event.KindMachineOOM || ev.Kind == event.KindMachineCrashed {
+			t.Errorf("requested stop classified as %s: %+v", ev.Kind, ev)
+		}
+	}
+}
+
+func TestPollerEmitsCapacityDegraded(t *testing.T) {
+	twoUp := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	oneUp := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"stopped","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+
+	current := twoUp
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 8)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	current = oneUp
+	_ = p.pollAll(context.Background())
+	got := collect(ch, 100*time.Millisecond)
+
+	var sawDegraded bool
+	for _, ev := range got {
+		if ev.Kind == event.KindCapacityDegraded {
+			sawDegraded = true
+		}
+	}
+	if !sawDegraded {
+		t.Errorf("expected capacity degraded event, got %+v", got)
+	}
+}
+
 func drain(ch chan event.Event) {
 	for {
 		select {

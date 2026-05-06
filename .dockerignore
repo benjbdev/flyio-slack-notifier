@@ -1,0 +1,14 @@
+.git
+.github
+.dockerignore
+.env
+.env.*
+*.db
+/notifier
+/bin
+/dist
+README.md
+CLAUDE.md
+Makefile
+config.yaml
+config.example.yaml

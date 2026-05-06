@@ -82,6 +82,57 @@ func TestListMachines404(t *testing.T) {
 	}
 }
 
+func TestParseExit(t *testing.T) {
+	cases := []struct {
+		name      string
+		request   string
+		wantOK    bool
+		wantOOM   bool
+		wantCode  int
+		wantStop  bool
+	}{
+		{
+			name:    "oom-killed",
+			request: `{"exit_event":{"exit_code":137,"guest_signal":-1,"oom_killed":true,"requested_stop":false}}`,
+			wantOK:  true, wantOOM: true, wantCode: 137,
+		},
+		{
+			name:    "crash non-zero exit",
+			request: `{"exit_event":{"exit_code":139,"guest_signal":11,"oom_killed":false,"requested_stop":false}}`,
+			wantOK:  true, wantCode: 139,
+		},
+		{
+			name:    "requested stop",
+			request: `{"exit_event":{"exit_code":0,"oom_killed":false,"requested_stop":true}}`,
+			wantOK:  true, wantStop: true,
+		},
+		{name: "no request payload", request: "", wantOK: false},
+		{name: "missing exit_event", request: `{"foo":"bar"}`, wantOK: false},
+		{name: "malformed json", request: `{not json`, wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := MachineEvent{Request: []byte(tc.request)}
+			got, ok := ev.ParseExit()
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if got.OOMKilled != tc.wantOOM {
+				t.Errorf("oom_killed = %v, want %v", got.OOMKilled, tc.wantOOM)
+			}
+			if got.ExitCode != tc.wantCode {
+				t.Errorf("exit_code = %d, want %d", got.ExitCode, tc.wantCode)
+			}
+			if got.RequestedStop != tc.wantStop {
+				t.Errorf("requested_stop = %v, want %v", got.RequestedStop, tc.wantStop)
+			}
+		})
+	}
+}
+
 func TestListMachines500BodyIncluded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

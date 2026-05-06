@@ -27,6 +27,9 @@ type Poller struct {
 	// current latest event per machine without emitting, so we don't
 	// spam Slack with the historical event log on startup.
 	bootstrap bool
+
+	crashes  *crashTracker
+	capacity *capacityTracker
 }
 
 func New(client *flyapi.Client, apps []string, interval time.Duration, store *Store, out chan<- event.Event, logger *slog.Logger) *Poller {
@@ -41,6 +44,8 @@ func New(client *flyapi.Client, apps []string, interval time.Duration, store *St
 		Out:       out,
 		Logger:    logger,
 		bootstrap: true,
+		crashes:   newCrashTracker(defaultCrashLoopThreshold, defaultCrashLoopWindow, defaultCrashLoopCooldown),
+		capacity:  newCapacityTracker(),
 	}
 }
 
@@ -87,6 +92,7 @@ func (p *Poller) pollApp(ctx context.Context, app string) error {
 	}
 
 	p.detectDeploy(app, machines)
+	p.observeCapacity(app, machines)
 
 	for _, m := range machines {
 		if err := p.processMachineEvents(app, m); err != nil {
@@ -94,6 +100,22 @@ func (p *Poller) pollApp(ctx context.Context, app string) error {
 		}
 	}
 	return nil
+}
+
+func (p *Poller) observeCapacity(app string, machines []flyapi.Machine) {
+	running := 0
+	for _, m := range machines {
+		if strings.EqualFold(m.State, "started") {
+			running++
+		}
+	}
+	if p.bootstrap {
+		p.capacity.seed(app, running)
+		return
+	}
+	if ev, ok := p.capacity.observe(app, running, time.Now()); ok {
+		p.emit(ev)
+	}
 }
 
 func (p *Poller) detectDeploy(app string, machines []flyapi.Machine) {
@@ -177,6 +199,11 @@ func (p *Poller) processMachineEvents(app string, m flyapi.Machine) error {
 		)
 		if ev, ok := mapMachineEvent(app, m, e); ok {
 			p.emit(ev)
+			if ev.Kind == event.KindMachineOOM || ev.Kind == event.KindMachineCrashed {
+				if loop, ok := p.crashes.observe(app, m.ID, m.Region, ev.Timestamp); ok {
+					p.emit(loop)
+				}
+			}
 		}
 	}
 
@@ -214,6 +241,9 @@ func mapMachineEvent(app string, m flyapi.Machine, e flyapi.MachineEvent) (event
 
 	switch {
 	case strings.Contains(t, "oom") || strings.Contains(s, "oom") || strings.Contains(s, "out-of-memory"):
+		// Legacy explicit-OOM-in-type/status. Kept for safety; the
+		// payload-aware path below catches the real Fly shape where
+		// type=exit and OOM lives in request.exit_event.oom_killed.
 		base.Kind = event.KindMachineOOM
 		base.Severity = event.SeverityCritical
 		base.Title = fmt.Sprintf("%s OOM-killed (%s)", m.ID, app)
@@ -221,6 +251,32 @@ func mapMachineEvent(app string, m flyapi.Machine, e flyapi.MachineEvent) (event
 		return base, true
 
 	case t == "exit" || s == "exited":
+		if ex, ok := e.ParseExit(); ok {
+			switch {
+			case ex.OOMKilled:
+				base.Kind = event.KindMachineOOM
+				base.Severity = event.SeverityCritical
+				base.Title = fmt.Sprintf("%s OOM-killed (%s)", m.ID, app)
+				base.Detail = fmt.Sprintf(
+					"Machine ran out of memory and was killed (exit_code=%d, guest_signal=%d).",
+					ex.ExitCode, ex.GuestSignal,
+				)
+				base.Fields["exit_code"] = strconv.Itoa(ex.ExitCode)
+				base.Fields["oom_killed"] = "true"
+				return base, true
+			case ex.ExitCode != 0 && !ex.RequestedStop:
+				base.Kind = event.KindMachineCrashed
+				base.Severity = event.SeverityCritical
+				base.Title = fmt.Sprintf("%s crashed (%s)", m.ID, app)
+				base.Detail = fmt.Sprintf(
+					"Machine exited with non-zero status (exit_code=%d, guest_signal=%d).",
+					ex.ExitCode, ex.GuestSignal,
+				)
+				base.Fields["exit_code"] = strconv.Itoa(ex.ExitCode)
+				base.Fields["guest_signal"] = strconv.Itoa(ex.GuestSignal)
+				return base, true
+			}
+		}
 		base.Kind = event.KindMachineExit
 		base.Severity = event.SeverityWarning
 		base.Title = fmt.Sprintf("%s exited (%s)", m.ID, app)
