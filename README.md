@@ -213,19 +213,64 @@ fly deploy
 deploy`; same `fly machine restart` flow as above. Clean up with
 `fly apps destroy notifier-test`.
 
-## Deploy on Fly using the published image
+## Using the published image
 
-Every push to `main` and every `v*` tag publishes a multi-arch image to
-GitHub Container Registry: `ghcr.io/benjbdev/flyio-slack-notifier`.
-Tags emitted: `latest` (main), `sha-<short>` (every commit), `vX.Y.Z`
-and `vX.Y` (semver releases). Pin to a SHA or semver tag in production —
-do not deploy `latest`.
+Every push to `main` and every `v*` tag publishes a multi-arch
+(linux/amd64 + linux/arm64) image to GitHub Container Registry:
+`ghcr.io/benjbdev/flyio-slack-notifier`.
 
-The image runs `notifier --config /app/config.yaml`. The state DB
-(`notifier.db`) lives at `/app/notifier.db` by default; mount a Fly
-volume there so a machine restart doesn't replay events.
+### Tags
 
-Minimal `fly.toml` for a consumer repo (e.g. under `infra/flyio-slack-notifier/`):
+| Tag | When emitted | When to use |
+|---|---|---|
+| `sha-<short>` | every commit on `main` | **production** — fully deterministic |
+| `vX.Y.Z` / `vX.Y` | on a semver tag push | production — pinned releases |
+| `latest` | every push to `main` | local smoke tests only — never prod |
+
+### How the image is wired
+
+- Entrypoint: `notifier --config /app/config.yaml`
+- Working directory: `/app`
+- BoltDB state file: `/app/notifier.db` (mount a volume here)
+- Required env: `FLY_API_TOKEN`, `SLACK_WEBHOOK_FLY_NOTIF` (referenced
+  as `${VAR}` from inside the mounted `config.yaml`)
+- Runs as root inside the container — Fly volumes are root-owned by
+  default, so no mount-permission gymnastics needed.
+
+### Local smoke test
+
+Spin up the image against your real Fly account + Slack channel before
+deploying anywhere:
+
+```bash
+cat > /tmp/notifier.yaml <<'YAML'
+fly:
+  api_token: ${FLY_API_TOKEN}
+apps:
+  - name: api-prod
+slack:
+  default_webhook: ${SLACK_WEBHOOK_FLY_NOTIF}
+poll_interval: 30s
+dedup_window: 5m
+state_file: /app/notifier.db
+digest:
+  enabled: true
+  schedule: "* * * * *"
+YAML
+
+docker run --rm \
+  -e FLY_API_TOKEN="$FLY_API_TOKEN" \
+  -e SLACK_WEBHOOK_FLY_NOTIF="$SLACK_WEBHOOK_FLY_NOTIF" \
+  -v /tmp/notifier.yaml:/app/config.yaml:ro \
+  ghcr.io/benjbdev/flyio-slack-notifier:latest
+```
+
+State doesn't persist with `--rm`. For a smoke test that survives
+restarts, replace `--rm` with `-v notifier-data:/app`.
+
+### Deploy on Fly
+
+Pin to a SHA tag in `fly.toml`:
 
 ```toml
 app = "my-fly-notifier"
@@ -266,6 +311,12 @@ Notes:
   duplicate every Slack message.
 - The image is publicly readable on GHCR — no registry auth needed in
   `fly.toml`.
+
+### Updating
+
+Bump the `image = "...:sha-<new>"` line in `fly.toml` and run
+`fly deploy`. The volume preserves `notifier.db`, so the cursor carries
+across — no replay of historical events.
 
 ## Tests
 
