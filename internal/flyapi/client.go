@@ -81,6 +81,35 @@ func (e MachineEvent) Time() time.Time {
 	return time.UnixMilli(e.Timestamp)
 }
 
+// ExitEvent describes Fly's nested exit metadata. Fly's Machines API
+// embeds OOM/exit-code/signal info inside the event's `request.exit_event`
+// payload — not in the top-level type/status fields — so we have to parse
+// the raw request JSON to distinguish OOM from a clean exit from a crash.
+type ExitEvent struct {
+	ExitCode      int  `json:"exit_code"`
+	GuestExitCode int  `json:"guest_exit_code"`
+	GuestSignal   int  `json:"guest_signal"`
+	OOMKilled     bool `json:"oom_killed"`
+	RequestedStop bool `json:"requested_stop"`
+	Restarting    bool `json:"restarting"`
+}
+
+// ParseExit returns the parsed exit_event payload, if present. Returns
+// false when the event has no request body or the body has no exit_event
+// member — both cases mean "not an exit event we can introspect".
+func (e MachineEvent) ParseExit() (ExitEvent, bool) {
+	if len(e.Request) == 0 {
+		return ExitEvent{}, false
+	}
+	var w struct {
+		ExitEvent *ExitEvent `json:"exit_event"`
+	}
+	if err := json.Unmarshal(e.Request, &w); err != nil || w.ExitEvent == nil {
+		return ExitEvent{}, false
+	}
+	return *w.ExitEvent, true
+}
+
 type CheckStatus struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`

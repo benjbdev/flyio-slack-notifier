@@ -12,13 +12,38 @@ go to Sentry or similar.
 ## What you get in Slack
 
 - **Deploys** — image ref change across an app's machines
-- **Machine lifecycle** — created, started, stopped, exited, OOM-killed,
-  destroyed
+- **Machine lifecycle** — created, started, stopped, exited, destroyed
+- **OOM kills** — `request.exit_event.oom_killed: true` in Fly's machine
+  events. Critical-severity. The Fly Machines API does **not** emit a
+  standalone "oom" event; the notifier parses the nested exit payload
+  to distinguish OOM from a clean exit.
+- **Crashes** — non-zero exit code without `requested_stop`. Surfaces
+  SIGSEGV, V8 abort-on-OOM, and other unexpected process deaths that
+  `oom_killed` alone doesn't cover.
+- **Crash loops** — the same machine sees ≥3 crash/OOM events inside a
+  10-minute sliding window. Critical-severity. Deliberately separate
+  from individual crashes: one OOM is a capacity hint, three in ten
+  minutes is "stop trying to recover, the resource ceiling is too low".
+  The machine is suppressed for 10 minutes after firing so a sustained
+  loop doesn't spam the channel.
+- **Capacity degraded / restored** — per app, the notifier tracks the
+  high-water-mark of running machines observed since startup and emits
+  when running count drops below it (degraded, critical) and when it
+  climbs back (restored, info). Surfaces a `min_machines_running`
+  shortfall as an immediate alert instead of waiting for the next
+  digest. HWM is in-memory and re-seeds on a notifier restart.
 - **Health-check transitions** — failing / passing
 - **Status digest** — recurring summary (default every minute, switch to
   hourly for production) showing per-app machine count by state, region
   distribution, failing checks, latest image. Also acts as a heartbeat:
   if it stops arriving, the notifier or its connectivity is broken.
+
+What's intentionally **not** monitored:
+
+- **App-level error logs** — send those to Sentry.
+- **Memory pressure short of an OOM kill** (sustained high heap usage,
+  Mark-Compact GC pauses). Needs the Prometheus metrics endpoint —
+  separate feature, not driven by the Machines API events stream.
 
 ## Prerequisites
 
@@ -187,6 +212,111 @@ fly deploy
 `fly launch` registers the app (so the API can see it) before `fly
 deploy`; same `fly machine restart` flow as above. Clean up with
 `fly apps destroy notifier-test`.
+
+## Using the published image
+
+Every push to `main` and every `v*` tag publishes a multi-arch
+(linux/amd64 + linux/arm64) image to GitHub Container Registry:
+`ghcr.io/benjbdev/flyio-slack-notifier`.
+
+### Tags
+
+| Tag | When emitted | When to use |
+|---|---|---|
+| `sha-<short>` | every commit on `main` | **production** — fully deterministic |
+| `vX.Y.Z` / `vX.Y` | on a semver tag push | production — pinned releases |
+| `latest` | every push to `main` | local smoke tests only — never prod |
+
+### How the image is wired
+
+- Entrypoint: `notifier --config /app/config.yaml`
+- Working directory: `/app`
+- BoltDB state file: `/app/notifier.db` (mount a volume here)
+- Required env: `FLY_API_TOKEN`, `SLACK_WEBHOOK_FLY_NOTIF` (referenced
+  as `${VAR}` from inside the mounted `config.yaml`)
+- Runs as root inside the container — Fly volumes are root-owned by
+  default, so no mount-permission gymnastics needed.
+
+### Local smoke test
+
+Spin up the image against your real Fly account + Slack channel before
+deploying anywhere:
+
+```bash
+cat > /tmp/notifier.yaml <<'YAML'
+fly:
+  api_token: ${FLY_API_TOKEN}
+apps:
+  - name: api-prod
+slack:
+  default_webhook: ${SLACK_WEBHOOK_FLY_NOTIF}
+poll_interval: 30s
+dedup_window: 5m
+state_file: /app/notifier.db
+digest:
+  enabled: true
+  schedule: "* * * * *"
+YAML
+
+docker run --rm \
+  -e FLY_API_TOKEN="$FLY_API_TOKEN" \
+  -e SLACK_WEBHOOK_FLY_NOTIF="$SLACK_WEBHOOK_FLY_NOTIF" \
+  -v /tmp/notifier.yaml:/app/config.yaml:ro \
+  ghcr.io/benjbdev/flyio-slack-notifier:latest
+```
+
+State doesn't persist with `--rm`. For a smoke test that survives
+restarts, replace `--rm` with `-v notifier-data:/app`.
+
+### Deploy on Fly
+
+Pin to a SHA tag in `fly.toml`:
+
+```toml
+app = "my-fly-notifier"
+primary_region = "cdg"
+
+[build]
+  image = "ghcr.io/benjbdev/flyio-slack-notifier:sha-abc1234"
+
+[[mounts]]
+  source = "notifier_data"
+  destination = "/app"
+
+[[files]]
+  guest_path = "/app/config.yaml"
+  local_path = "config.yaml"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+```
+
+One-time setup:
+
+```bash
+fly apps create my-fly-notifier
+fly volumes create notifier_data --size 1 --region cdg --app my-fly-notifier
+fly secrets set --app my-fly-notifier \
+  FLY_API_TOKEN=... SLACK_WEBHOOK_FLY_NOTIF=...
+fly deploy --app my-fly-notifier
+```
+
+Notes:
+
+- `${FLY_API_TOKEN}` and `${SLACK_WEBHOOK_FLY_NOTIF}` references inside
+  the mounted `config.yaml` resolve from the Fly secrets at process
+  start — no rebuild needed when secrets rotate.
+- Single machine is fine; the notifier doesn't need HA. Two would
+  duplicate every Slack message.
+- The image is publicly readable on GHCR — no registry auth needed in
+  `fly.toml`.
+
+### Updating
+
+Bump the `image = "...:sha-<new>"` line in `fly.toml` and run
+`fly deploy`. The volume preserves `notifier.db`, so the cursor carries
+across — no replay of historical events.
 
 ## Tests
 

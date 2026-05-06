@@ -97,6 +97,14 @@ func emoji(e event.Event) string {
 		return ":rocket:"
 	case event.KindMachineOOM:
 		return ":boom:"
+	case event.KindMachineCrashed:
+		return ":skull:"
+	case event.KindCrashLoop:
+		return ":rotating_light:"
+	case event.KindCapacityDegraded:
+		return ":rotating_light:"
+	case event.KindCapacityRestored:
+		return ":white_check_mark:"
 	case event.KindMachineExit, event.KindMachineStopped:
 		return ":octagonal_sign:"
 	case event.KindMachineStarted, event.KindMachineCreated:
