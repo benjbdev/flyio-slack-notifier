@@ -230,8 +230,12 @@ Every push to `main` and every `v*` tag publishes a multi-arch
 ### How the image is wired
 
 - Entrypoint: `notifier --config /app/config.yaml`
-- Working directory: `/app`
-- BoltDB state file: `/app/notifier.db` (mount a volume here)
+- Working directory: `/app` (image-baked, not a mount target — see below)
+- BoltDB state file: configurable via `state_file:` in `config.yaml`.
+  Set it to a path on a **separate** volume mount (e.g. `/data/notifier.db`).
+  **Do not mount the persistent volume at `/app`** — it shadows the
+  injected `config.yaml` and triggers a `chowning … ENOENT` reboot
+  loop on Fly. The deploy section below uses `/data` for this reason.
 - Required env: `FLY_API_TOKEN`, `SLACK_WEBHOOK_FLY_NOTIF` (referenced
   as `${VAR}` from inside the mounted `config.yaml`)
 - Runs as root inside the container — Fly volumes are root-owned by
@@ -252,7 +256,7 @@ slack:
   default_webhook: ${SLACK_WEBHOOK_FLY_NOTIF}
 poll_interval: 30s
 dedup_window: 5m
-state_file: /app/notifier.db
+state_file: /data/notifier.db
 digest:
   enabled: true
   schedule: "* * * * *"
@@ -262,11 +266,14 @@ docker run --rm \
   -e FLY_API_TOKEN="$FLY_API_TOKEN" \
   -e SLACK_WEBHOOK_FLY_NOTIF="$SLACK_WEBHOOK_FLY_NOTIF" \
   -v /tmp/notifier.yaml:/app/config.yaml:ro \
+  -v notifier-data:/data \
   ghcr.io/benjbdev/flyio-slack-notifier:latest
 ```
 
-State doesn't persist with `--rm`. For a smoke test that survives
-restarts, replace `--rm` with `-v notifier-data:/app`.
+A bind-mount of a single file at `/app/config.yaml` doesn't trigger
+the volume-shadow problem — Docker overlays the file, not the
+directory. The Fly issue is specific to mounting a whole volume on
+top of `/app`.
 
 ### Deploy on Fly
 
@@ -281,7 +288,7 @@ primary_region = "cdg"
 
 [[mounts]]
   source = "notifier_data"
-  destination = "/app"
+  destination = "/data"
 
 [[files]]
   guest_path = "/app/config.yaml"
@@ -292,15 +299,48 @@ primary_region = "cdg"
   memory = "256mb"
 ```
 
+The volume mount destination **must not collide** with `/app` (the
+image's WORKDIR) or with any path Fly's `[[files]]` block writes to.
+Fly writes injected files first, then mounts the volume on top — if
+the destinations overlap, the mount shadows the file and the boot
+sequence reboot-loops on `chowning file ... ENOENT`. Mount the
+volume at a separate path like `/data` and point `state_file:` in
+your `config.yaml` at it (`state_file: /data/notifier.db`).
+
 One-time setup:
 
 ```bash
 fly apps create my-fly-notifier
+
 fly volumes create notifier_data --size 1 --region cdg --app my-fly-notifier
+
 fly secrets set --app my-fly-notifier \
-  FLY_API_TOKEN=... SLACK_WEBHOOK_FLY_NOTIF=...
+  FLY_API_TOKEN="$(fly tokens create readonly <org-slug>)" \
+  SLACK_WEBHOOK_FLY_NOTIF=https://hooks.slack.com/services/...
+
+# First deploy: flyctl can't deploy an image-based fly.toml to an empty
+# app. It errors with "could not create a fly.toml from any machines".
+# Bootstrap with an explicit machine create instead:
+fly machine run \
+  --app my-fly-notifier \
+  --region cdg \
+  --vm-size shared-cpu-1x --vm-memory 256 \
+  --volume notifier_data:/data \
+  --file-local /app/config.yaml=config.yaml \
+  ghcr.io/benjbdev/flyio-slack-notifier:sha-abc1234
+
+# (One-time) reconcile under the `app` process group so future
+# `fly deploy` calls see the machine. The first `fly deploy` creates
+# a *second* machine because the bootstrap one has no process-group
+# label; destroy the bootstrap machine + its orphan volume after.
 fly deploy --app my-fly-notifier
+fly machine list --app my-fly-notifier      # find the no-group machine
+fly volumes list --app my-fly-notifier      # find its orphan volume
+fly machine destroy <bootstrap-machine-id> --force --app my-fly-notifier
+fly volumes destroy <orphan-volume-id> --app my-fly-notifier
 ```
+
+After this dance, future SHA bumps are a clean `fly deploy`.
 
 Notes:
 
