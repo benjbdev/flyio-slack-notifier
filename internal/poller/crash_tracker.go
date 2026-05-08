@@ -41,6 +41,21 @@ func newCrashTracker(threshold int, window, cooldown time.Duration) *crashTracke
 	}
 }
 
+// inCooldown reports whether a crash-loop alert has fired for this
+// machine recently enough that the cooldown is still active. Callers
+// use it to suppress per-crash alerts while a loop is already known —
+// the loop alert is the consolidated signal and individual crashes
+// during cooldown are noise.
+func (c *crashTracker) inCooldown(app, machineID string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	last, ok := c.lastFired[app+"/"+machineID]
+	if !ok {
+		return false
+	}
+	return now.Sub(last) < c.cooldown
+}
+
 func (c *crashTracker) observe(app, machineID, region string, now time.Time) (event.Event, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -31,8 +31,8 @@ type AppSummary struct {
 }
 
 type Snapshot struct {
-	GeneratedAt time.Time
-	Apps        []AppSummary
+	GeneratedAt     time.Time
+	Apps            []AppSummary
 	OverallSeverity event.Severity
 }
 

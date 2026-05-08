@@ -75,7 +75,7 @@ func TestDispatcherDedup(t *testing.T) {
 	d := newTestDispatcher(t, srv.URL)
 	ev := event.Event{
 		Kind: event.KindMachineStarted, App: "a", MachineID: "m1",
-		Title: "started",
+		Title:  "started",
 		Fields: map[string]string{"machine": "m1"},
 	}
 	d.handle(context.Background(), ev)
