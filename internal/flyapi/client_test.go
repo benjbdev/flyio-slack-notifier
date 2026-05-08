@@ -84,12 +84,12 @@ func TestListMachines404(t *testing.T) {
 
 func TestParseExit(t *testing.T) {
 	cases := []struct {
-		name      string
-		request   string
-		wantOK    bool
-		wantOOM   bool
-		wantCode  int
-		wantStop  bool
+		name     string
+		request  string
+		wantOK   bool
+		wantOOM  bool
+		wantCode int
+		wantStop bool
 	}{
 		{
 			name:    "oom-killed",

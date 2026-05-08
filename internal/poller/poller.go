@@ -197,14 +197,27 @@ func (p *Poller) processMachineEvents(app string, m flyapi.Machine) error {
 			"source", e.Source,
 			"event_id", e.ID,
 		)
-		if ev, ok := mapMachineEvent(app, m, e); ok {
-			p.emit(ev)
-			if ev.Kind == event.KindMachineOOM || ev.Kind == event.KindMachineCrashed {
-				if loop, ok := p.crashes.observe(app, m.ID, m.Region, ev.Timestamp); ok {
-					p.emit(loop)
-				}
-			}
+		ev, ok := mapMachineEvent(app, m, e)
+		if !ok {
+			continue
 		}
+		if ev.Kind == event.KindMachineOOM || ev.Kind == event.KindMachineCrashed {
+			// Snapshot cooldown state BEFORE recording this crash.
+			// If a loop alert already fired and we're still inside
+			// the cooldown, suppress the per-crash message — the
+			// loop alert covers it. observe() still records the
+			// event so the count stays accurate across windows.
+			suppress := p.crashes.inCooldown(app, m.ID, ev.Timestamp)
+			loop, looping := p.crashes.observe(app, m.ID, m.Region, ev.Timestamp)
+			if !suppress {
+				p.emit(ev)
+			}
+			if looping {
+				p.emit(loop)
+			}
+			continue
+		}
+		p.emit(ev)
 	}
 
 	if newCount > 0 && p.bootstrap {
@@ -219,6 +232,22 @@ func (p *Poller) processMachineEvents(app string, m flyapi.Machine) error {
 	return nil
 }
 
+// mapMachineEvent translates a raw Fly machine event into a Slack-bound
+// alert. It deliberately emits ONLY for events that carry actionable
+// signal (crashes, OOMs, failing health checks). Routine lifecycle
+// chatter — start/restart/launch/update/destroy — is dropped because:
+//
+//   - deploys are already announced once via KindDeploy (see detectDeploy),
+//   - a machine that comes up and stays up is a non-event,
+//   - a machine that goes down and stays down is caught by the
+//     capacity tracker's degraded alert + re-alert,
+//   - a machine that crashes is caught by the exit-payload branch below,
+//     and a sustained loop is folded into KindCrashLoop.
+//
+// Anything not in the allowlist returns (zero, false) and is silently
+// dropped. The poller still logs every event at INFO via slog, so the
+// runtime logs remain a complete audit trail; only the Slack stream is
+// filtered.
 func mapMachineEvent(app string, m flyapi.Machine, e flyapi.MachineEvent) (event.Event, bool) {
 	t := strings.ToLower(e.Type)
 	s := strings.ToLower(e.Status)
@@ -251,61 +280,41 @@ func mapMachineEvent(app string, m flyapi.Machine, e flyapi.MachineEvent) (event
 		return base, true
 
 	case t == "exit" || s == "exited":
-		if ex, ok := e.ParseExit(); ok {
-			switch {
-			case ex.OOMKilled:
-				base.Kind = event.KindMachineOOM
-				base.Severity = event.SeverityCritical
-				base.Title = fmt.Sprintf("%s OOM-killed (%s)", m.ID, app)
-				base.Detail = fmt.Sprintf(
-					"Machine ran out of memory and was killed (exit_code=%d, guest_signal=%d).",
-					ex.ExitCode, ex.GuestSignal,
-				)
-				base.Fields["exit_code"] = strconv.Itoa(ex.ExitCode)
-				base.Fields["oom_killed"] = "true"
-				return base, true
-			case ex.ExitCode != 0 && !ex.RequestedStop:
-				base.Kind = event.KindMachineCrashed
-				base.Severity = event.SeverityCritical
-				base.Title = fmt.Sprintf("%s crashed (%s)", m.ID, app)
-				base.Detail = fmt.Sprintf(
-					"Machine exited with non-zero status (exit_code=%d, guest_signal=%d).",
-					ex.ExitCode, ex.GuestSignal,
-				)
-				base.Fields["exit_code"] = strconv.Itoa(ex.ExitCode)
-				base.Fields["guest_signal"] = strconv.Itoa(ex.GuestSignal)
-				return base, true
-			}
+		ex, ok := e.ParseExit()
+		if !ok {
+			// No exit payload → can't tell crash from clean shutdown
+			// from deploy-driven stop. Stay silent rather than emit a
+			// noisy "exited" warning that might just be a redeploy.
+			return event.Event{}, false
 		}
-		base.Kind = event.KindMachineExit
-		base.Severity = event.SeverityWarning
-		base.Title = fmt.Sprintf("%s exited (%s)", m.ID, app)
-		base.Detail = "Machine process exited."
-		return base, true
-
-	case strings.HasPrefix(t, "start") || s == "started" || s == "starting":
-		base.Kind = event.KindMachineStarted
-		base.Severity = event.SeverityInfo
-		base.Title = fmt.Sprintf("%s started (%s)", m.ID, app)
-		return base, true
-
-	case strings.HasPrefix(t, "stop") || s == "stopped" || s == "stopping":
-		base.Kind = event.KindMachineStopped
-		base.Severity = event.SeverityWarning
-		base.Title = fmt.Sprintf("%s stopped (%s)", m.ID, app)
-		return base, true
-
-	case t == "create" || t == "launch" || s == "created":
-		base.Kind = event.KindMachineCreated
-		base.Severity = event.SeverityInfo
-		base.Title = fmt.Sprintf("%s created (%s)", m.ID, app)
-		return base, true
-
-	case t == "destroy" || s == "destroyed":
-		base.Kind = event.KindMachineDestroyed
-		base.Severity = event.SeverityInfo
-		base.Title = fmt.Sprintf("%s destroyed (%s)", m.ID, app)
-		return base, true
+		switch {
+		case ex.OOMKilled:
+			base.Kind = event.KindMachineOOM
+			base.Severity = event.SeverityCritical
+			base.Title = fmt.Sprintf("%s OOM-killed (%s)", m.ID, app)
+			base.Detail = fmt.Sprintf(
+				"Machine ran out of memory and was killed (exit_code=%d, guest_signal=%d).",
+				ex.ExitCode, ex.GuestSignal,
+			)
+			base.Fields["exit_code"] = strconv.Itoa(ex.ExitCode)
+			base.Fields["oom_killed"] = "true"
+			return base, true
+		case ex.ExitCode != 0 && !ex.RequestedStop:
+			base.Kind = event.KindMachineCrashed
+			base.Severity = event.SeverityCritical
+			base.Title = fmt.Sprintf("%s crashed (%s)", m.ID, app)
+			base.Detail = fmt.Sprintf(
+				"Machine exited with non-zero status (exit_code=%d, guest_signal=%d).",
+				ex.ExitCode, ex.GuestSignal,
+			)
+			base.Fields["exit_code"] = strconv.Itoa(ex.ExitCode)
+			base.Fields["guest_signal"] = strconv.Itoa(ex.GuestSignal)
+			return base, true
+		}
+		// Clean exit (exit_code=0 or requested_stop=true). Silent —
+		// indistinguishable from a deploy/replace/scale stop, so we
+		// don't classify it as a process failure.
+		return event.Event{}, false
 
 	case strings.Contains(t, "healthcheck") || strings.Contains(t, "health_check") || strings.Contains(t, "check"):
 		if strings.Contains(s, "fail") || strings.Contains(s, "critical") || strings.Contains(s, "warn") {
@@ -314,27 +323,14 @@ func mapMachineEvent(app string, m flyapi.Machine, e flyapi.MachineEvent) (event
 			base.Title = fmt.Sprintf("Health check failing on %s (%s)", m.ID, app)
 			return base, true
 		}
-		if strings.Contains(s, "pass") || strings.Contains(s, "ok") {
-			base.Kind = event.KindHealthCheckPassing
-			base.Severity = event.SeverityInfo
-			base.Title = fmt.Sprintf("Health check passing on %s (%s)", m.ID, app)
-			return base, true
-		}
-
-	case t == "restart" || strings.Contains(t, "restart"):
-		base.Kind = event.KindMachineStarted
-		base.Severity = event.SeverityInfo
-		base.Title = fmt.Sprintf("%s restarting (%s)", m.ID, app)
-		return base, true
+		// Healthcheck passing/recovery → silent. Capacity + crash
+		// alerts already cover the inverse signal.
+		return event.Event{}, false
 	}
 
-	// Unknown type/status — emit a generic machine event so we never
-	// silently drop something that landed in events[]. Better to be
-	// slightly noisy than to miss a state change.
-	base.Kind = event.KindMachineEvent
-	base.Severity = event.SeverityInfo
-	base.Title = fmt.Sprintf("%s: %s/%s on %s", app, e.Type, e.Status, m.ID)
-	return base, true
+	// start/restart/launch/update/stop/destroy and any other lifecycle
+	// transitions are intentionally silent.
+	return event.Event{}, false
 }
 
 func (p *Poller) emit(ev event.Event) {

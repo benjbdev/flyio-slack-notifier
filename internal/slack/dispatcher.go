@@ -26,8 +26,8 @@ type Dispatcher struct {
 	Logger      *slog.Logger
 	Now         func() time.Time
 
-	mu       sync.Mutex
-	dedup    map[string]time.Time
+	mu    sync.Mutex
+	dedup map[string]time.Time
 }
 
 func NewDispatcher(webhookURL string, dedupWindow time.Duration, logger *slog.Logger) *Dispatcher {

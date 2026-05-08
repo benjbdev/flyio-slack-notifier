@@ -6,44 +6,63 @@ Self-hosted Slack notifier for Fly.io. Polls the Fly Machines API and
 posts deploy / lifecycle / health-check events plus a recurring status
 digest to a Slack channel via an Incoming Webhook.
 
-App-level log errors are intentionally **not** monitored — assume those
-go to Sentry or similar.
+App-level log errors are intentionally **not** monitored — those belong
+in your error-tracking tool of choice, not here.
 
 ## What you get in Slack
 
-- **Deploys** — image ref change across an app's machines
-- **Machine lifecycle** — created, started, stopped, exited, destroyed
+The notifier sends a **signal-only** stream — every message is meant to
+be actionable. Routine machine lifecycle chatter (start, restart,
+launch/created, update/replacing, clean exits) is silently dropped
+because that traffic dwarfs the alerts that actually matter when
+something goes wrong. If you want to confirm "the machine came back",
+check the next status digest or the Fly dashboard.
+
+- **Deploys** — image ref change across an app's machines (a single
+  rocket message per deploy, not per machine).
 - **OOM kills** — `request.exit_event.oom_killed: true` in Fly's machine
   events. Critical-severity. The Fly Machines API does **not** emit a
   standalone "oom" event; the notifier parses the nested exit payload
   to distinguish OOM from a clean exit.
 - **Crashes** — non-zero exit code without `requested_stop`. Surfaces
   SIGSEGV, V8 abort-on-OOM, and other unexpected process deaths that
-  `oom_killed` alone doesn't cover.
+  `oom_killed` alone doesn't cover. Once a crash-loop alert fires for
+  a machine, individual crash events for that machine are suppressed
+  for 10 minutes — the loop alert is the consolidated signal.
 - **Crash loops** — the same machine sees ≥3 crash/OOM events inside a
   10-minute sliding window. Critical-severity. Deliberately separate
   from individual crashes: one OOM is a capacity hint, three in ten
   minutes is "stop trying to recover, the resource ceiling is too low".
-  The machine is suppressed for 10 minutes after firing so a sustained
-  loop doesn't spam the channel.
 - **Capacity degraded / restored** — per app, the notifier tracks the
   high-water-mark of running machines observed since startup and emits
-  when running count drops below it (degraded, critical) and when it
-  climbs back (restored, info). Surfaces a `min_machines_running`
-  shortfall as an immediate alert instead of waiting for the next
-  digest. HWM is in-memory and re-seeds on a notifier restart.
-- **Health-check transitions** — failing / passing
-- **Status digest** — recurring summary (default every minute, switch to
-  hourly for production) showing per-app machine count by state, region
-  distribution, failing checks, latest image. Also acts as a heartbeat:
-  if it stops arriving, the notifier or its connectivity is broken.
+  when running count drops below it (degraded, critical). If capacity
+  stays below HWM, the alert **re-fires every 10 minutes** as
+  "STILL degraded" so a long-lived shortfall can't get lost in chat
+  scrollback. "Restored" only fires after **two consecutive healthy
+  polls** to ride out crash-loop flap (degraded ↔ restored on every
+  poll while a machine ping-pongs). HWM is in-memory and re-seeds on
+  a notifier restart.
+- **Health-check failing** — critical. Passing/recovery transitions
+  are silent (covered by the inverse signal of the failing alert
+  going quiet + the digest).
+- **Status digest** — recurring summary (default hourly) showing
+  per-app machine count by state, region distribution, failing
+  checks, latest image. Also acts as a heartbeat: if it stops
+  arriving, the notifier or its connectivity is broken. Digests
+  always go through — never deduped.
 
-What's intentionally **not** monitored:
+What's intentionally **not** monitored / sent:
 
-- **App-level error logs** — send those to Sentry.
+- **Routine machine lifecycle** (start, restart, launch, update,
+  clean exit, destroy) — these accompany every deploy and every
+  auto-recovery and turn the channel into a wall of green checkmarks.
+  Deploys are one rocket message; capacity loss is a re-firing
+  degraded alert; a process crashing is a crash event. Anything else
+  is plumbing.
+- **App-level error logs** — those belong in your error-tracking tool.
 - **Memory pressure short of an OOM kill** (sustained high heap usage,
-  Mark-Compact GC pauses). Needs the Prometheus metrics endpoint —
-  separate feature, not driven by the Machines API events stream.
+  Mark-Compact GC pauses). Needs the Fly metrics endpoint — a separate
+  feature, not driven by the Machines API events stream.
 
 ## Prerequisites
 

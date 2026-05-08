@@ -60,6 +60,29 @@ func TestCrashTrackerWindowExpiresOldEvents(t *testing.T) {
 	}
 }
 
+func TestCrashTrackerInCooldownReflectsLastFired(t *testing.T) {
+	c := newCrashTracker(2, 10*time.Minute, 10*time.Minute)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	if c.inCooldown("api-prod", "m1", now) {
+		t.Error("fresh tracker should not report cooldown")
+	}
+	c.observe("api-prod", "m1", "cdg", now)
+	if c.inCooldown("api-prod", "m1", now) {
+		t.Error("cooldown should not engage before threshold crossed")
+	}
+	c.observe("api-prod", "m1", "cdg", now.Add(time.Minute)) // fires loop
+	if !c.inCooldown("api-prod", "m1", now.Add(2*time.Minute)) {
+		t.Error("cooldown must be active immediately after loop fires")
+	}
+	if c.inCooldown("api-prod", "m1", now.Add(15*time.Minute)) {
+		t.Error("cooldown must lapse past the configured window")
+	}
+	if c.inCooldown("api-prod", "m2", now.Add(2*time.Minute)) {
+		t.Error("cooldown must be per-machine")
+	}
+}
+
 func TestCrashTrackerSeparatesPerMachine(t *testing.T) {
 	c := newCrashTracker(3, 10*time.Minute, 10*time.Minute)
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)

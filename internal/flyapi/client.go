@@ -43,10 +43,10 @@ type Machine struct {
 }
 
 type ImageRef struct {
-	Registry   string `json:"registry"`
-	Repository string `json:"repository"`
-	Tag        string `json:"tag"`
-	Digest     string `json:"digest"`
+	Registry   string            `json:"registry"`
+	Repository string            `json:"repository"`
+	Tag        string            `json:"tag"`
+	Digest     string            `json:"digest"`
 	Labels     map[string]string `json:"labels"`
 }
 

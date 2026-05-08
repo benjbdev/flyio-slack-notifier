@@ -11,7 +11,7 @@ import (
 
 // Message is the JSON payload posted to a Slack incoming webhook.
 type Message struct {
-	Text        string  `json:"text"`
+	Text        string       `json:"text"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
