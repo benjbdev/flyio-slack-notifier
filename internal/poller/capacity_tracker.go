@@ -23,6 +23,12 @@ const (
 	// requiring two healthy polls in a row prevents a degraded ↔
 	// restored alert pair from firing on every poll.
 	defaultHealthyStreakRequired = 2
+
+	// defaultDeploySafetyTimeout caps how long a rolling deploy can
+	// suppress capacity alerts. Past this, observe() falls through to
+	// normal behavior so a wedged deploy stuck at half-capacity still
+	// surfaces as degraded — silent failure is worse than a noisy one.
+	defaultDeploySafetyTimeout = 15 * time.Minute
 )
 
 // capacityTracker watches per-app counts of running machines and emits
@@ -40,8 +46,10 @@ type capacityTracker struct {
 	degraded        map[string]bool
 	lastAlertedAt   map[string]time.Time
 	healthyStreak   map[string]int
+	deployStartedAt map[string]time.Time
 	realertInterval time.Duration
 	healthyRequired int
+	deployTimeout   time.Duration
 }
 
 func newCapacityTracker() *capacityTracker {
@@ -50,8 +58,10 @@ func newCapacityTracker() *capacityTracker {
 		degraded:        map[string]bool{},
 		lastAlertedAt:   map[string]time.Time{},
 		healthyStreak:   map[string]int{},
+		deployStartedAt: map[string]time.Time{},
 		realertInterval: defaultCapacityRealert,
 		healthyRequired: defaultHealthyStreakRequired,
+		deployTimeout:   defaultDeploySafetyTimeout,
 	}
 }
 
@@ -73,7 +83,14 @@ func (c *capacityTracker) seed(app string, running int) {
 //   - a recovery event (running has been at HWM for healthyRequired
 //     consecutive observations), or
 //   - (zero, false) when nothing newly transitioned.
-func (c *capacityTracker) observe(app string, running int, now time.Time) (event.Event, bool) {
+//
+// The `deploying` flag, when true, suppresses degraded/restored emits
+// because a rolling deploy briefly drops running below HWM and isn't an
+// outage. The healthyStreak is also reset so a transient spike to HWM
+// mid-deploy can't insta-fire "restored" once the deploy clears. To
+// guard against a wedged deploy hiding a real outage forever, the
+// suppression lifts after deployTimeout and normal alerting resumes.
+func (c *capacityTracker) observe(app string, running int, deploying bool, now time.Time) (event.Event, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -84,6 +101,20 @@ func (c *capacityTracker) observe(app string, running int, now time.Time) (event
 
 	if hwm == 0 {
 		return event.Event{}, false
+	}
+
+	if deploying {
+		if c.deployStartedAt[app].IsZero() {
+			c.deployStartedAt[app] = now
+		}
+		if now.Sub(c.deployStartedAt[app]) < c.deployTimeout {
+			c.healthyStreak[app] = 0
+			return event.Event{}, false
+		}
+		// Past the safety timeout: fall through so a stuck deploy
+		// stranded at half-capacity still surfaces as degraded.
+	} else {
+		delete(c.deployStartedAt, app)
 	}
 
 	if running < hwm {

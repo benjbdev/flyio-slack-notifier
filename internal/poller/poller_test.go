@@ -361,6 +361,120 @@ func TestPollerEmitsCapacityDegraded(t *testing.T) {
 	}
 }
 
+// A rolling deploy walks through: 2/2 on v1 → 1/2 (one machine swapped
+// to v2 mid-cycle) → 2/2 mixed → 1/2 (other machine swapped) → 2/2 on
+// v2. The poller should emit exactly one KindDeploy and zero capacity
+// events. Without deploy-aware suppression this would fire degraded
+// twice and restored once.
+func TestPollerSuppressesCapacityEventsDuringRollingDeploy(t *testing.T) {
+	twoV1 := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	// m1 stopped, replaced with v2 image (mixed images now)
+	rollingA := `[
+		{"id":"m1","state":"stopped","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	// m1 back up on v2, m2 still v1
+	rollingB := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	// m2 cycling
+	rollingC := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]},
+		{"id":"m2","state":"stopped","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]}
+	]`
+	// Deploy done: both on v2
+	twoV2 := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]}
+	]`
+
+	current := twoV1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 16)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	// bootstrap pass: cursors set, HWM seeded to 2, image_ref stored.
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	for _, state := range []string{rollingA, rollingB, rollingC, twoV2, twoV2} {
+		current = state
+		_ = p.pollAll(context.Background())
+	}
+
+	got := collect(ch, 100*time.Millisecond)
+	kinds := map[event.Kind]int{}
+	for _, ev := range got {
+		kinds[ev.Kind]++
+	}
+	if kinds[event.KindCapacityDegraded] != 0 {
+		t.Errorf("expected zero degraded during rolling deploy, got %d (%+v)", kinds[event.KindCapacityDegraded], got)
+	}
+	if kinds[event.KindCapacityRestored] != 0 {
+		t.Errorf("expected zero restored (never went degraded), got %d (%+v)", kinds[event.KindCapacityRestored], got)
+	}
+	if kinds[event.KindDeploy] != 1 {
+		t.Errorf("expected exactly one deploy event, got %d (%+v)", kinds[event.KindDeploy], got)
+	}
+}
+
+// A real outage with no image divergence (machine just dies, same
+// image as the stored baseline) must still alert. Regression guard for
+// the deploy-suppression change.
+func TestPollerStillEmitsDegradedOnRealOutage(t *testing.T) {
+	twoUp := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	// One machine dead, same image (no deploy).
+	oneDown := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"stopped","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+
+	current := twoUp
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 8)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	current = oneDown
+	_ = p.pollAll(context.Background())
+	got := collect(ch, 100*time.Millisecond)
+
+	var sawDegraded bool
+	for _, ev := range got {
+		if ev.Kind == event.KindCapacityDegraded {
+			sawDegraded = true
+		}
+	}
+	if !sawDegraded {
+		t.Errorf("real outage (no image divergence) must still fire degraded, got %+v", got)
+	}
+}
+
 // Once the crash tracker has fired a crash-loop alert, individual
 // per-crash events for that machine should be suppressed until the
 // cooldown elapses — the loop alert is the consolidated signal.
