@@ -91,8 +91,14 @@ func (p *Poller) pollApp(ctx context.Context, app string) error {
 		return err
 	}
 
+	// Compute deploy-in-progress BEFORE detectDeploy updates the
+	// stored image_ref — otherwise the last poll of a deploy (when
+	// dominance has just flipped) would look like steady state and
+	// we'd fire a stray capacity-restored on the way out.
+	deploying := p.deployInProgress(app, machines)
+
 	p.detectDeploy(app, machines)
-	p.observeCapacity(app, machines)
+	p.observeCapacity(app, machines, deploying)
 
 	for _, m := range machines {
 		if err := p.processMachineEvents(app, m); err != nil {
@@ -102,7 +108,43 @@ func (p *Poller) pollApp(ctx context.Context, app string) error {
 	return nil
 }
 
-func (p *Poller) observeCapacity(app string, machines []flyapi.Machine) {
+// deployInProgress reports whether this app appears to be mid-deploy:
+// machines have a mix of image_refs, OR any machine's image_ref differs
+// from the dominant image we last persisted. This is a heuristic — Fly
+// doesn't expose an explicit deploy state — but it's reliable enough to
+// gate capacity alerts so a rolling deploy doesn't masquerade as an
+// outage.
+//
+// Returns false when no baseline is recorded yet (first ever poll of an
+// app); in that case detectDeploy is about to record one for the first
+// time and there's nothing to compare against.
+func (p *Poller) deployInProgress(app string, machines []flyapi.Machine) bool {
+	refs := map[string]struct{}{}
+	for _, m := range machines {
+		ref := m.ImageRef.String()
+		if ref == "" {
+			ref = m.Config.Image
+		}
+		if ref != "" {
+			refs[ref] = struct{}{}
+		}
+	}
+	if len(refs) > 1 {
+		return true
+	}
+	stored, _ := p.Store.GetMeta(app, metaImageRef)
+	if stored == "" {
+		return false
+	}
+	for ref := range refs {
+		if ref != stored {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Poller) observeCapacity(app string, machines []flyapi.Machine, deploying bool) {
 	running := 0
 	for _, m := range machines {
 		if strings.EqualFold(m.State, "started") {
@@ -113,14 +155,18 @@ func (p *Poller) observeCapacity(app string, machines []flyapi.Machine) {
 		p.capacity.seed(app, running)
 		return
 	}
-	if ev, ok := p.capacity.observe(app, running, time.Now()); ok {
+	if ev, ok := p.capacity.observe(app, running, deploying, time.Now()); ok {
 		p.emit(ev)
 	}
 }
 
 func (p *Poller) detectDeploy(app string, machines []flyapi.Machine) {
-	current := dominantImage(machines)
+	current := uniformImage(machines)
 	if current == "" {
+		// Mixed images across machines: deploy in flight, not yet
+		// converged. Wait — emitting now (or worse, updating the
+		// stored ref) would race the rolling cycle and flip back and
+		// forth as machines swap one by one.
 		return
 	}
 
@@ -149,25 +195,31 @@ func (p *Poller) detectDeploy(app string, machines []flyapi.Machine) {
 	_ = p.Store.SetMeta(app, metaImageRef, current)
 }
 
-func dominantImage(machines []flyapi.Machine) string {
-	counts := map[string]int{}
-	var best string
-	bestN := 0
+// uniformImage returns the image_ref shared by every machine that has
+// one, or "" if machines disagree (rolling deploy mid-flight) or none
+// expose an image_ref. Returning "" deliberately stalls detectDeploy
+// during transitional states: emitting "deployed" partway through a
+// roll-out would race the cycle and flip back and forth as machines
+// swap one by one, and would also update the stored cursor early
+// enough that deployInProgress would lose visibility on the remaining
+// legs of the deploy.
+func uniformImage(machines []flyapi.Machine) string {
+	var ref string
 	for _, m := range machines {
-		ref := m.ImageRef.String()
-		if ref == "" {
-			ref = m.Config.Image
+		r := m.ImageRef.String()
+		if r == "" {
+			r = m.Config.Image
 		}
-		if ref == "" {
+		if r == "" {
 			continue
 		}
-		counts[ref]++
-		if counts[ref] > bestN {
-			bestN = counts[ref]
-			best = ref
+		if ref == "" {
+			ref = r
+		} else if ref != r {
+			return ""
 		}
 	}
-	return best
+	return ref
 }
 
 func (p *Poller) processMachineEvents(app string, m flyapi.Machine) error {
