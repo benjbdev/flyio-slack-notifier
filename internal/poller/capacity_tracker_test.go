@@ -23,9 +23,16 @@ func TestCapacityTrackerEmitsDegradedAndRestored(t *testing.T) {
 	c.seed("api-prod", 2)
 	now := time.Now()
 
+	// First running<HWM observation builds the degraded streak but
+	// does not yet fire — hysteresis against Fly's rolling-deploy
+	// window where the running count drops before the new image_ref
+	// is visible.
+	if _, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Errorf("first sub-HWM observation should not yet fire degraded")
+	}
 	ev, ok := c.observe("api-prod", 1, false, now)
 	if !ok || ev.Kind != event.KindCapacityDegraded {
-		t.Fatalf("expected degraded event, got ok=%v kind=%s", ok, ev.Kind)
+		t.Fatalf("expected degraded event on second sub-HWM observation, got ok=%v kind=%s", ok, ev.Kind)
 	}
 	if ev.Fields["running"] != "1" || ev.Fields["expected"] != "2" {
 		t.Errorf("fields wrong: %+v", ev.Fields)
@@ -51,9 +58,12 @@ func TestCapacityTrackerSuppressesFlap(t *testing.T) {
 	c.seed("api-prod", 2)
 	now := time.Now()
 
-	// degraded → emits once
+	// degraded → emits on second sub-HWM observation (hysteresis)
+	if _, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Fatal("first observation must not fire (hysteresis)")
+	}
 	if _, ok := c.observe("api-prod", 1, false, now); !ok {
-		t.Fatal("expected initial degraded emit")
+		t.Fatal("expected degraded emit on second observation")
 	}
 	// quick bounce back to 2/2: should NOT emit restored yet
 	if ev, ok := c.observe("api-prod", 2, false, now.Add(30*time.Second)); ok {
@@ -72,8 +82,11 @@ func TestCapacityTrackerRealertsWhenStillDegraded(t *testing.T) {
 	c.seed("api-prod", 2)
 	now := time.Now()
 
+	if _, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Fatal("first observation must not fire (hysteresis)")
+	}
 	if _, ok := c.observe("api-prod", 1, false, now); !ok {
-		t.Fatal("expected initial degraded emit")
+		t.Fatal("expected degraded emit on second observation")
 	}
 
 	// Inside re-alert window: silent.
@@ -102,8 +115,11 @@ func TestCapacityTrackerRaisesHWMOnGrowth(t *testing.T) {
 	if _, ok := c.observe("api-prod", 3, false, now); ok {
 		t.Errorf("growth above HWM should not emit")
 	}
+	if _, ok := c.observe("api-prod", 2, false, now); ok {
+		t.Errorf("first sub-HWM observation should not fire (hysteresis)")
+	}
 	if _, ok := c.observe("api-prod", 2, false, now); !ok {
-		t.Errorf("running=2 with HWM=3 should emit degraded")
+		t.Errorf("second observation at running=2 with HWM=3 should emit degraded")
 	}
 }
 
@@ -115,6 +131,9 @@ func TestCapacityTrackerSeparatesPerApp(t *testing.T) {
 
 	if _, ok := c.observe("worker", 1, false, now); ok {
 		t.Errorf("worker steady should not emit")
+	}
+	if _, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Fatal("first sub-HWM observation must not fire (hysteresis)")
 	}
 	ev, ok := c.observe("api-prod", 1, false, now)
 	if !ok || ev.App != "api-prod" {
@@ -179,10 +198,14 @@ func TestCapacityTrackerDeploySafetyTimeoutFiresDegraded(t *testing.T) {
 		t.Errorf("must stay suppressed mid-window")
 	}
 
-	// Past timeout: degraded fires.
-	ev, ok := c.observe("api-prod", 1, true, now.Add(6*time.Minute))
+	// Past timeout, the suppression lifts but degraded hysteresis
+	// still requires two observations to gate the first transition.
+	if _, ok := c.observe("api-prod", 1, true, now.Add(6*time.Minute)); ok {
+		t.Errorf("first post-timeout observation must not fire (hysteresis)")
+	}
+	ev, ok := c.observe("api-prod", 1, true, now.Add(6*time.Minute+30*time.Second))
 	if !ok || ev.Kind != event.KindCapacityDegraded {
-		t.Fatalf("expected degraded after safety timeout, got ok=%v kind=%s", ok, ev.Kind)
+		t.Fatalf("expected degraded after safety timeout + hysteresis, got ok=%v kind=%s", ok, ev.Kind)
 	}
 }
 
@@ -195,13 +218,73 @@ func TestCapacityTrackerPausesRealertDuringDeploy(t *testing.T) {
 	c.seed("api-prod", 2)
 	now := time.Now()
 
-	// Real outage: degraded fires.
+	// Real outage: degraded fires after hysteresis (2 polls).
+	if _, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Fatal("first sub-HWM observation must not fire")
+	}
 	if _, ok := c.observe("api-prod", 1, false, now); !ok {
-		t.Fatal("expected initial degraded emit")
+		t.Fatal("expected degraded emit on second observation")
 	}
 	// Operator deploys a fix; deploying=true now suppresses the
 	// re-alert that would otherwise fire past realertInterval.
 	if ev, ok := c.observe("api-prod", 1, true, now.Add(6*time.Minute)); ok {
 		t.Errorf("deploy in progress must pause still-degraded re-alert, got %+v", ev)
+	}
+}
+
+// Reproduces the real-world scenario the divergence-only fix missed:
+// Fly drops the running count to 1 BEFORE the new image_ref is
+// visible in the API. Without hysteresis the first poll fires
+// degraded; with hysteresis the second poll sees the divergence and
+// flips deploying=true, suppressing the alert entirely.
+func TestCapacityTrackerHysteresisCoversZeroDivergenceWindow(t *testing.T) {
+	c := newCapacityTracker()
+	c.seed("api-prod", 2)
+	now := time.Now()
+
+	// Poll 1: machine dropped, but Fly hasn't surfaced the new image
+	// yet — deploying flag is still false. Hysteresis must hold the
+	// alert.
+	if ev, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Fatalf("first sub-HWM poll must not fire (hysteresis); got %+v", ev)
+	}
+	// Poll 2 (30s later): image divergence now visible, deploying=true.
+	// Streak resets, no degraded fires.
+	if ev, ok := c.observe("api-prod", 1, true, now.Add(30*time.Second)); ok {
+		t.Errorf("deploy detected on second poll must suppress degraded, got %+v", ev)
+	}
+	// Poll 3: deploy progressing, running=2 with mixed images.
+	if ev, ok := c.observe("api-prod", 2, true, now.Add(60*time.Second)); ok {
+		t.Errorf("mid-deploy at HWM must stay silent, got %+v", ev)
+	}
+	// Poll 4: deploy complete, refs converged.
+	if ev, ok := c.observe("api-prod", 2, false, now.Add(90*time.Second)); ok {
+		t.Errorf("post-deploy first poll must not fire, got %+v", ev)
+	}
+	// Poll 5: steady state. No restored because we never went degraded.
+	if ev, ok := c.observe("api-prod", 2, false, now.Add(120*time.Second)); ok {
+		t.Errorf("post-deploy steady state must not fire restored, got %+v", ev)
+	}
+}
+
+// A transient single-poll dip — running drops then immediately
+// recovers — must not accumulate toward a later alert. Verifies the
+// degraded streak resets on healthy observations.
+func TestCapacityTrackerHysteresisResetsOnRecovery(t *testing.T) {
+	c := newCapacityTracker()
+	c.seed("api-prod", 2)
+	now := time.Now()
+
+	// Single dip then recovery.
+	if _, ok := c.observe("api-prod", 1, false, now); ok {
+		t.Fatal("first dip must not fire")
+	}
+	if _, ok := c.observe("api-prod", 2, false, now.Add(30*time.Second)); ok {
+		t.Fatal("recovery must not fire restored (never went degraded)")
+	}
+	// Another single dip — streak should have reset, so this is
+	// streak=1 again, not streak=2.
+	if ev, ok := c.observe("api-prod", 1, false, now.Add(60*time.Second)); ok {
+		t.Fatalf("second isolated dip must not fire (streak should have reset), got %+v", ev)
 	}
 }
