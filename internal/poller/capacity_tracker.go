@@ -29,6 +29,14 @@ const (
 	// normal behavior so a wedged deploy stuck at half-capacity still
 	// surfaces as degraded — silent failure is worse than a noisy one.
 	defaultDeploySafetyTimeout = 15 * time.Minute
+
+	// defaultDegradedStreakRequired is how many consecutive
+	// running<HWM observations are required before declaring degraded.
+	// One poll of hysteresis catches the common Fly deploy pattern
+	// where the API briefly reports running=1 BEFORE the new
+	// machine's image_ref surfaces — by the second poll the divergence
+	// is visible and deployInProgress flips the suppression on.
+	defaultDegradedStreakRequired = 2
 )
 
 // capacityTracker watches per-app counts of running machines and emits
@@ -41,27 +49,31 @@ const (
 // In-memory only: a restart re-seeds HWM on the bootstrap pass so we
 // never alert against a fictional pre-startup expectation.
 type capacityTracker struct {
-	mu              sync.Mutex
-	hwm             map[string]int
-	degraded        map[string]bool
-	lastAlertedAt   map[string]time.Time
-	healthyStreak   map[string]int
-	deployStartedAt map[string]time.Time
-	realertInterval time.Duration
-	healthyRequired int
-	deployTimeout   time.Duration
+	mu               sync.Mutex
+	hwm              map[string]int
+	degraded         map[string]bool
+	lastAlertedAt    map[string]time.Time
+	healthyStreak    map[string]int
+	degradedStreak   map[string]int
+	deployStartedAt  map[string]time.Time
+	realertInterval  time.Duration
+	healthyRequired  int
+	degradedRequired int
+	deployTimeout    time.Duration
 }
 
 func newCapacityTracker() *capacityTracker {
 	return &capacityTracker{
-		hwm:             map[string]int{},
-		degraded:        map[string]bool{},
-		lastAlertedAt:   map[string]time.Time{},
-		healthyStreak:   map[string]int{},
-		deployStartedAt: map[string]time.Time{},
-		realertInterval: defaultCapacityRealert,
-		healthyRequired: defaultHealthyStreakRequired,
-		deployTimeout:   defaultDeploySafetyTimeout,
+		hwm:              map[string]int{},
+		degraded:         map[string]bool{},
+		lastAlertedAt:    map[string]time.Time{},
+		healthyStreak:    map[string]int{},
+		degradedStreak:   map[string]int{},
+		deployStartedAt:  map[string]time.Time{},
+		realertInterval:  defaultCapacityRealert,
+		healthyRequired:  defaultHealthyStreakRequired,
+		degradedRequired: defaultDegradedStreakRequired,
+		deployTimeout:    defaultDeploySafetyTimeout,
 	}
 }
 
@@ -90,6 +102,14 @@ func (c *capacityTracker) seed(app string, running int) {
 // mid-deploy can't insta-fire "restored" once the deploy clears. To
 // guard against a wedged deploy hiding a real outage forever, the
 // suppression lifts after deployTimeout and normal alerting resumes.
+//
+// First-degraded transitions also require degradedRequired consecutive
+// observations of running<HWM. Fly's API has a window during rolling
+// deploys where running drops to N-1 BEFORE the replacement machine's
+// image_ref appears, so the divergence-based deploy detector can't see
+// it on poll 1 — but it does on poll 2. The hysteresis bridges that
+// gap; once already degraded, no streak is needed (we're already
+// past the gate).
 func (c *capacityTracker) observe(app string, running int, deploying bool, now time.Time) (event.Event, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -109,6 +129,7 @@ func (c *capacityTracker) observe(app string, running int, deploying bool, now t
 		}
 		if now.Sub(c.deployStartedAt[app]) < c.deployTimeout {
 			c.healthyStreak[app] = 0
+			c.degradedStreak[app] = 0
 			return event.Event{}, false
 		}
 		// Past the safety timeout: fall through so a stuck deploy
@@ -121,7 +142,12 @@ func (c *capacityTracker) observe(app string, running int, deploying bool, now t
 		c.healthyStreak[app] = 0
 
 		if !c.degraded[app] {
+			c.degradedStreak[app]++
+			if c.degradedStreak[app] < c.degradedRequired {
+				return event.Event{}, false
+			}
 			c.degraded[app] = true
+			c.degradedStreak[app] = 0
 			c.lastAlertedAt[app] = now
 			return event.Event{
 				Kind:      event.KindCapacityDegraded,
@@ -168,9 +194,11 @@ func (c *capacityTracker) observe(app string, running int, deploying bool, now t
 		return event.Event{}, false
 	}
 
-	// running >= hwm: healthy this poll. Only declare "restored"
-	// after healthyRequired consecutive observations to ride out
-	// crash-loop flap.
+	// running >= hwm: healthy this poll. Reset the degraded streak so
+	// a brief dip-then-recover doesn't accumulate toward a future
+	// alert. Only declare "restored" after healthyRequired consecutive
+	// observations to ride out crash-loop flap.
+	c.degradedStreak[app] = 0
 	if c.degraded[app] {
 		c.healthyStreak[app]++
 		if c.healthyStreak[app] < c.healthyRequired {

@@ -346,7 +346,10 @@ func TestPollerEmitsCapacityDegraded(t *testing.T) {
 	p.bootstrap = false
 	drain(ch)
 
+	// Two polls required: hysteresis gates the first transition into
+	// degraded so a single-poll Fly deploy window doesn't false-alarm.
 	current = oneUp
+	_ = p.pollAll(context.Background())
 	_ = p.pollAll(context.Background())
 	got := collect(ch, 100*time.Millisecond)
 
@@ -357,7 +360,7 @@ func TestPollerEmitsCapacityDegraded(t *testing.T) {
 		}
 	}
 	if !sawDegraded {
-		t.Errorf("expected capacity degraded event, got %+v", got)
+		t.Errorf("expected capacity degraded event after two sub-HWM polls, got %+v", got)
 	}
 }
 
@@ -460,7 +463,10 @@ func TestPollerStillEmitsDegradedOnRealOutage(t *testing.T) {
 	p.bootstrap = false
 	drain(ch)
 
+	// Two consecutive polls at degraded capacity → hysteresis lets
+	// the alert through.
 	current = oneDown
+	_ = p.pollAll(context.Background())
 	_ = p.pollAll(context.Background())
 	got := collect(ch, 100*time.Millisecond)
 
@@ -472,6 +478,74 @@ func TestPollerStillEmitsDegradedOnRealOutage(t *testing.T) {
 	}
 	if !sawDegraded {
 		t.Errorf("real outage (no image divergence) must still fire degraded, got %+v", got)
+	}
+}
+
+// Reproduces the production incident the divergence-only fix missed:
+// Fly's API drops running to 1 BEFORE the new machine's image_ref is
+// visible. Poll 1 sees only the old image; poll 2 sees the new image
+// appear. Hysteresis must prevent a degraded alert on poll 1 so that
+// poll 2's deployInProgress=true can suppress it.
+func TestPollerSuppressesDegradedWhenDivergenceLagsRunningDrop(t *testing.T) {
+	twoV1 := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	// Poll 1: m2 dropped but still reporting v1 image_ref — no divergence.
+	oneV1 := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"stopped","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]}
+	]`
+	// Poll 2: m2 starting on v2 — divergence is now visible.
+	mixed := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v1"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]}
+	]`
+	// Poll 3: m1 cycling now, m2 on v2.
+	mixedCycling := `[
+		{"id":"m1","state":"stopped","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]}
+	]`
+	// Poll 4: deploy complete.
+	twoV2 := `[
+		{"id":"m1","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]},
+		{"id":"m2","state":"started","region":"cdg","image_ref":{"repository":"api-prod","tag":"v2"},"events":[]}
+	]`
+
+	current := twoV1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, current)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ch := make(chan event.Event, 16)
+	c := flyapi.New(srv.URL, "tk")
+	p := New(c, []string{"api-prod"}, time.Second, store, ch, logger)
+
+	_ = p.pollAll(context.Background())
+	p.bootstrap = false
+	drain(ch)
+
+	for _, state := range []string{oneV1, mixed, mixedCycling, twoV2, twoV2} {
+		current = state
+		_ = p.pollAll(context.Background())
+	}
+
+	got := collect(ch, 100*time.Millisecond)
+	kinds := map[event.Kind]int{}
+	for _, ev := range got {
+		kinds[ev.Kind]++
+	}
+	if kinds[event.KindCapacityDegraded] != 0 {
+		t.Errorf("zero-divergence-window deploy must not fire degraded, got %d (all: %+v)", kinds[event.KindCapacityDegraded], got)
+	}
+	if kinds[event.KindCapacityRestored] != 0 {
+		t.Errorf("must not fire restored when never degraded, got %d", kinds[event.KindCapacityRestored])
+	}
+	if kinds[event.KindDeploy] != 1 {
+		t.Errorf("expected exactly one deploy event, got %d (%+v)", kinds[event.KindDeploy], got)
 	}
 }
 
